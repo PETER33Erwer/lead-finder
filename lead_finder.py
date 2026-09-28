@@ -23,8 +23,8 @@ USER_AGENT = "Mozilla/5.0 (compatible; peters-lead-finder/2.0; personal use)"
 
 # Jobicy keyword searches (each one is one request per run)
 JOBICY_TAGS = ["graphic design", "brand", "logo"]
-# We Work Remotely design feed
-WWR_FEEDS = ["https://weworkremotely.com/categories/remote-design-jobs.rss"]
+# We Work Remotely design feed (left empty: WWR now paywalls applying)
+WWR_FEEDS = []
 
 DESIGN_TERMS = [
     "graphic designer", "graphic design", "brand designer", "brand identity",
@@ -156,26 +156,32 @@ def telegram(text):
 def main():
     cutoff = time.time() - LOOKBACK_HOURS * 3600
     jobs = []
-    worked = 0
+    searches_tried = 0
+    searches_worked = 0
 
     for tag in JOBICY_TAGS:
+        searches_tried += 1
         try:
-            jobs += fetch_jobicy(tag)
-            worked += 1
+            found = fetch_jobicy(tag)
+            jobs += found
+            searches_worked += 1
+            print(f"Jobicy '{tag}': fetched {len(found)} job(s).")
         except Exception as err:
             print(f"Jobicy '{tag}': could not fetch ({err})")
         time.sleep(2)
 
     for feed in WWR_FEEDS:
+        searches_tried += 1
         try:
-            jobs += fetch_wwr(feed)
-            worked += 1
+            found = fetch_wwr(feed)
+            jobs += found
+            searches_worked += 1
+            print(f"We Work Remotely: fetched {len(found)} job(s).")
         except Exception as err:
             print(f"We Work Remotely: could not fetch ({err})")
         time.sleep(2)
 
-    print(f"Fetched {len(jobs)} jobs from {worked} successful request(s).")
-
+    matched = 0
     seen = set()
     sent = 0
     for job in jobs:
@@ -189,6 +195,7 @@ def main():
             continue
         if not is_match(job):
             continue
+        matched += 1
         if already_saved(link):
             continue
 
@@ -211,8 +218,14 @@ def main():
         sent += 1
         print(f"Saved and sent: {link}")
 
-    print(f"Done. {sent} new lead(s).")
-    if worked == 0:
+    print("")
+    print("===== SEARCH SUMMARY =====")
+    print(f"Searches run: {searches_worked} of {searches_tried} succeeded.")
+    print(f"Jobs looked at: {len(jobs)}")
+    print(f"Jobs matching your keywords: {matched}")
+    print(f"New leads sent to Telegram this run: {sent}")
+    print("===========================")
+    if searches_worked == 0:
         raise SystemExit("Every job feed failed. They may be blocking this server.")
 
 
