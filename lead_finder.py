@@ -1,10 +1,14 @@
-"""Finds design-hiring posts on Reddit, saves them to Supabase, pings Telegram."""
+"""Finds remote design jobs from open job feeds, saves them to Supabase, pings Telegram."""
+import html
 import json
 import os
 import re
 import time
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
@@ -13,30 +17,21 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 PORTFOLIO_URL = os.environ.get("PORTFOLIO_URL", "[portfolio link]")
 
 # ---------- Things you can edit ----------
-SUBREDDITS = ["forhire", "DesignJobs", "graphic_design", "logodesign"]
+LOOKBACK_HOURS = 72
 MAX_ALERTS_PER_RUN = 10
-LOOKBACK_HOURS = 24
-USER_AGENT = "web:peters-lead-finder:v1.0 (personal freelance tool)"
+USER_AGENT = "Mozilla/5.0 (compatible; peters-lead-finder/2.0; personal use)"
+
+# Jobicy keyword searches (each one is one request per run)
+JOBICY_TAGS = ["graphic design", "brand", "logo"]
+# We Work Remotely design feed
+WWR_FEEDS = ["https://weworkremotely.com/categories/remote-design-jobs.rss"]
 
 DESIGN_TERMS = [
-    "logo", "brand identity", "branding", "brand design", "visual identity",
-    "graphic design", "graphic designer", "flyer", "poster", "business card",
-    "social media design", "social media graphics", "packaging",
-    "brand guidelines", "brand kit",
+    "graphic designer", "graphic design", "brand designer", "brand identity",
+    "branding", "logo", "visual designer", "visual identity", "packaging",
+    "creative designer", "social media design", "social media graphics",
 ]
-HIRING_TERMS = [
-    "hiring", "looking for", "need a", "need an", "seeking", "commission",
-    "paid", "budget", "quote", "freelance", "contract", "gig",
-]
-RUSH_TERMS = ["urgent", "asap", "rush", "today", "tomorrow", "24 hours", "48 hours"]
-
-# Your rate sheet in USD (converted from your Naira prices)
-PRICES = {
-    "brand": ("Brand identity package", 109),
-    "logo": ("Logo design", 36),
-    "card": ("Business card design", 11),
-    "flyer": ("Flyer / poster design", 11),
-}
+FREELANCE_TERMS = ["freelance", "contract", "contractor", "part-time", "part time"]
 # -----------------------------------------
 
 
@@ -44,67 +39,77 @@ def has_any(text, terms):
     return any(re.search(r"\b" + re.escape(t) + r"s?\b", text) for t in terms)
 
 
-def http(url, method="GET", headers=None, body=None):
+def strip_html(text):
+    text = re.sub(r"<[^>]+>", " ", text or "")
+    return re.sub(r"\s+", " ", html.unescape(text)).strip()
+
+
+def http(url, method="GET", headers=None, body=None, raw=False):
     req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
     with urllib.request.urlopen(req, timeout=30) as resp:
-        raw = resp.read().decode("utf-8")
-        return json.loads(raw) if raw else None
+        text = resp.read().decode("utf-8", errors="replace")
+    if raw:
+        return text
+    return json.loads(text) if text else None
 
 
-def fetch_subreddit(sub):
-    url = f"https://www.reddit.com/r/{sub}/new.json?limit=50&raw_json=1"
-    data = http(url, headers={"User-Agent": USER_AGENT})
-    return [child["data"] for child in data["data"]["children"]]
+def parse_iso(value):
+    try:
+        dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
-def is_lead(sub, post):
-    title = (post.get("title") or "").lower()
-    text = title + "\n" + (post.get("selftext") or "").lower()
-    if sub.lower() == "forhire":
-        if "[hiring]" not in title:
-            return False
-    else:
-        if "for hire" in title:
-            return False
-        if not has_any(text, HIRING_TERMS):
-            return False
-    return has_any(text, DESIGN_TERMS)
+def fetch_jobicy(tag):
+    query = urllib.parse.urlencode({"count": 50, "tag": tag})
+    data = http(f"https://jobicy.com/api/v2/remote-jobs?{query}", headers={"User-Agent": USER_AGENT})
+    jobs = []
+    for j in (data or {}).get("jobs", []):
+        jobs.append({
+            "source": "Jobicy",
+            "title": str(j.get("jobTitle", "")),
+            "company": str(j.get("companyName", "")),
+            "location": str(j.get("jobGeo", "")),
+            "link": str(j.get("url", "")),
+            "text": strip_html(j.get("jobExcerpt") or j.get("jobDescription") or ""),
+            "ts": parse_iso(j.get("pubDate", "")),
+        })
+    return jobs
 
 
-def suggest(text):
-    t = text.lower()
-    if has_any(t, ["brand identity", "branding", "brand guidelines", "brand kit", "visual identity"]):
-        key = "brand"
-    elif has_any(t, ["logo"]):
-        key = "logo"
-    elif has_any(t, ["business card"]):
-        key = "card"
-    elif has_any(t, ["flyer", "poster", "social media design", "social media graphics"]):
-        key = "flyer"
-    else:
-        return None, None, False
-    item, price = PRICES[key]
-    rush = has_any(t, RUSH_TERMS)
-    if rush:
-        price = round(price * 1.3)
-    return item, price, rush
+def fetch_wwr(feed_url):
+    xml_text = http(feed_url, headers={"User-Agent": USER_AGENT}, raw=True)
+    root = ET.fromstring(xml_text)
+    jobs = []
+    for item in root.iter("item"):
+        full_title = (item.findtext("title") or "").strip()
+        company, _, role = full_title.partition(": ")
+        if not role:
+            company, role = "", full_title
+        ts = None
+        pub = item.findtext("pubDate")
+        if pub:
+            try:
+                ts = parsedate_to_datetime(pub).timestamp()
+            except Exception:
+                ts = None
+        jobs.append({
+            "source": "We Work Remotely",
+            "title": role,
+            "company": company,
+            "location": (item.findtext("region") or "").strip(),
+            "link": (item.findtext("link") or "").strip(),
+            "text": strip_html(item.findtext("description") or ""),
+            "ts": ts,
+        })
+    return jobs
 
 
-def build_pitch(item, price):
-    if item:
-        return (
-            f"Hi! I saw your post and I'd love to help with your {item.lower()}. "
-            "I'm Peter, a freelance designer specializing in logo design, branding "
-            f"and graphic design. You can see my work here: {PORTFOLIO_URL}. "
-            f"My rate for this is ${price}, delivered in 2 to 3 days. "
-            "Happy to chat about your vision!"
-        )
-    return (
-        "Hi! I saw your post and I'd love to help. I'm Peter, a freelance designer "
-        "specializing in logo design, branding and graphic design. You can see my "
-        f"work here: {PORTFOLIO_URL}. Rates depend on scope, and I'm happy to share "
-        "a quote once I know more about your project."
-    )
+def is_match(job):
+    return has_any((job["title"] + " " + job["text"]).lower(), DESIGN_TERMS)
 
 
 def supabase_headers():
@@ -120,13 +125,14 @@ def already_saved(link):
     return bool(http(url, headers=supabase_headers()))
 
 
-def save_lead(link, name, wants):
+def save_lead(job):
     headers = supabase_headers()
     headers["Prefer"] = "return=minimal"
+    wants = f"{job['title']}\nLocation: {job['location'] or 'not listed'}\n\n{job['text'][:400]}".strip()
     body = json.dumps({
-        "source": "Reddit",
-        "link": link,
-        "name": name,
+        "source": job["source"],
+        "link": job["link"],
+        "name": job["company"] or job["source"],
         "what_client_wants": wants,
         "status": "new",
     }).encode("utf-8")
@@ -149,57 +155,65 @@ def telegram(text):
 
 def main():
     cutoff = time.time() - LOOKBACK_HOURS * 3600
-    failed = 0
-    sent = 0
+    jobs = []
+    worked = 0
 
-    for sub in SUBREDDITS:
-        if sent >= MAX_ALERTS_PER_RUN:
-            break
+    for tag in JOBICY_TAGS:
         try:
-            posts = fetch_subreddit(sub)
+            jobs += fetch_jobicy(tag)
+            worked += 1
         except Exception as err:
-            print(f"r/{sub}: could not fetch ({err})")
-            failed += 1
-            continue
+            print(f"Jobicy '{tag}': could not fetch ({err})")
         time.sleep(2)
 
-        for post in posts:
-            if sent >= MAX_ALERTS_PER_RUN:
-                break
-            if post.get("stickied") or post.get("created_utc", 0) < cutoff:
-                continue
-            if not is_lead(sub, post):
-                continue
+    for feed in WWR_FEEDS:
+        try:
+            jobs += fetch_wwr(feed)
+            worked += 1
+        except Exception as err:
+            print(f"We Work Remotely: could not fetch ({err})")
+        time.sleep(2)
 
-            link = "https://www.reddit.com" + post["permalink"]
-            if already_saved(link):
-                continue
+    print(f"Fetched {len(jobs)} jobs from {worked} successful request(s).")
 
-            title = post.get("title", "")
-            body = (post.get("selftext") or "")[:400]
-            author = "u/" + post.get("author", "unknown")
-            save_lead(link, author, (title + "\n\n" + body).strip())
+    seen = set()
+    sent = 0
+    for job in jobs:
+        if sent >= MAX_ALERTS_PER_RUN:
+            break
+        link = job["link"]
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        if job["ts"] is not None and job["ts"] < cutoff:
+            continue
+        if not is_match(job):
+            continue
+        if already_saved(link):
+            continue
 
-            item, price, rush = suggest(title + "\n" + body)
-            quote = "Rates depend on scope"
-            if item:
-                quote = f"{item}: ${price}" + (" (includes 30% rush fee)" if rush else "")
+        save_lead(job)
 
-            message = (
-                f"New lead from r/{sub}\n\n{title}\n\n"
-                f"Suggested quote: {quote}\n{link}\n\n"
-                f"Pitch:\n{build_pitch(item, price)}"
-            )
-            try:
-                telegram(message)
-            except Exception as err:
-                print(f"Telegram failed: {err}")
-            sent += 1
-            print(f"Saved and sent: {link}")
+        flag = ""
+        if has_any((job["title"] + " " + job["text"]).lower(), FREELANCE_TERMS):
+            flag = " (freelance/contract)"
+        message = (
+            f"New design job from {job['source']}\n\n"
+            f"{job['title']}\n"
+            f"{job['company'] or 'Company not listed'} | {job['location'] or 'location not listed'}{flag}\n"
+            f"{link}\n\n"
+            f"Portfolio to send: {PORTFOLIO_URL}"
+        )
+        try:
+            telegram(message)
+        except Exception as err:
+            print(f"Telegram failed: {err}")
+        sent += 1
+        print(f"Saved and sent: {link}")
 
     print(f"Done. {sent} new lead(s).")
-    if failed == len(SUBREDDITS):
-        raise SystemExit("Every Reddit request failed, Reddit may be blocking this server.")
+    if worked == 0:
+        raise SystemExit("Every job feed failed. They may be blocking this server.")
 
 
 if __name__ == "__main__":
