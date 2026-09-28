@@ -1,4 +1,4 @@
-"""Finds remote design jobs from open job feeds, saves them to Supabase, pings Telegram."""
+"""Finds remote jobs from open job feeds, saves them to Supabase, pings Telegram."""
 import html
 import json
 import os
@@ -29,6 +29,8 @@ JOBICY_TAGS = [
     "automation", "ai integration", "chatbot",
     "digital marketing", "paid ads", "social media marketing",
 ]
+# RemoteOK tag searches
+REMOTEOK_TAGS = ["design", "video", "marketing"]
 # We Work Remotely design feed (left empty: WWR now paywalls applying)
 WWR_FEEDS = []
 
@@ -87,6 +89,25 @@ def fetch_jobicy(tag):
             "link": str(j.get("url", "")),
             "text": strip_html(j.get("jobExcerpt") or j.get("jobDescription") or ""),
             "ts": parse_iso(j.get("pubDate", "")),
+        })
+    return jobs
+
+
+def fetch_remoteok(tag):
+    url = f"https://remoteok.com/api?tag={urllib.parse.quote(tag)}"
+    data = http(url, headers={"User-Agent": USER_AGENT})
+    jobs = []
+    for j in (data or []):
+        if not isinstance(j, dict) or "id" not in j:
+            continue
+        jobs.append({
+            "source": "RemoteOK",
+            "title": str(j.get("position", "")),
+            "company": str(j.get("company", "")),
+            "location": str(j.get("location", "")),
+            "link": str(j.get("url", "")),
+            "text": strip_html(j.get("description", "")),
+            "ts": j.get("epoch"),
         })
     return jobs
 
@@ -190,6 +211,17 @@ def main():
             print(f"We Work Remotely: fetched {len(found)} job(s).")
         except Exception as err:
             print(f"We Work Remotely: could not fetch ({err})")
+        time.sleep(2)
+
+    for tag in REMOTEOK_TAGS:
+        searches_tried += 1
+        try:
+            found = fetch_remoteok(tag)
+            jobs += found
+            searches_worked += 1
+            print(f"RemoteOK '{tag}': fetched {len(found)} job(s).")
+        except Exception as err:
+            print(f"RemoteOK '{tag}': could not fetch ({err})")
         time.sleep(2)
 
     matched = 0
