@@ -22,7 +22,13 @@ MAX_ALERTS_PER_RUN = 10
 USER_AGENT = "Mozilla/5.0 (compatible; peters-lead-finder/2.0; personal use)"
 
 # Jobicy keyword searches (each one is one request per run)
-JOBICY_TAGS = ["graphic design", "brand", "logo"]
+JOBICY_TAGS = [
+    "graphic design", "brand", "logo",
+    "ui design", "ux design", "product design",
+    "video editor", "video editing",
+    "automation", "ai integration", "chatbot",
+    "digital marketing", "paid ads", "social media marketing",
+]
 # We Work Remotely design feed (left empty: WWR now paywalls applying)
 WWR_FEEDS = []
 
@@ -30,6 +36,11 @@ DESIGN_TERMS = [
     "graphic designer", "graphic design", "brand designer", "brand identity",
     "branding", "logo", "visual designer", "visual identity", "packaging",
     "creative designer", "social media design", "social media graphics",
+    "ui designer", "ux designer", "ui/ux", "product designer",
+    "video editor", "video editing", "video production", "ad video",
+    "automation specialist", "workflow automation", "ai automation",
+    "chatbot", "digital marketer", "paid ads", "ad campaigns",
+    "social media marketing",
 ]
 FREELANCE_TERMS = ["freelance", "contract", "contractor", "part-time", "part time"]
 # -----------------------------------------
@@ -205,7 +216,7 @@ def main():
         if has_any((job["title"] + " " + job["text"]).lower(), FREELANCE_TERMS):
             flag = " (freelance/contract)"
         message = (
-            f"New design job from {job['source']}\n\n"
+            f"New job lead from {job['source']}\n\n"
             f"{job['title']}\n"
             f"{job['company'] or 'Company not listed'} | {job['location'] or 'location not listed'}{flag}\n"
             f"{link}\n\n"
