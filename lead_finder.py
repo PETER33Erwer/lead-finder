@@ -21,18 +21,16 @@ LOOKBACK_HOURS = 72
 MAX_ALERTS_PER_RUN = 10
 USER_AGENT = "Mozilla/5.0 (compatible; peters-lead-finder/2.0; personal use)"
 
-# Jobicy keyword searches (each one is one request per run)
 JOBICY_TAGS = [
-    "graphic design", "brand", "logo",
+    "graphic design", "logo", "brand",
     "ui design", "ux design", "product design",
     "video editor", "video editing",
     "automation", "ai integration", "chatbot",
     "digital marketing", "paid ads", "social media marketing",
 ]
-# RemoteOK tag searches
+HIMALAYAS_QUERIES = ["graphic design", "logo design", "flyer design", "social media design"]
 REMOTEOK_TAGS = ["design", "video", "marketing"]
-# We Work Remotely design feed (left empty: WWR now paywalls applying)
-WWR_FEEDS = []
+WWR_FEEDS = []  # removed: now requires a paid subscription to apply
 
 DESIGN_TERMS = [
     "graphic designer", "graphic design", "brand designer", "brand identity",
@@ -43,6 +41,11 @@ DESIGN_TERMS = [
     "automation specialist", "workflow automation", "ai automation",
     "chatbot", "digital marketer", "paid ads", "ad campaigns",
     "social media marketing",
+]
+# Jobs matching these always get sent before anything else
+PRIORITY_TERMS = [
+    "graphic designer", "graphic design", "logo", "flyer",
+    "social media design", "social media graphics", "brand identity", "branding",
 ]
 FREELANCE_TERMS = ["freelance", "contract", "contractor", "part-time", "part time"]
 # -----------------------------------------
@@ -108,6 +111,40 @@ def fetch_remoteok(tag):
             "link": str(j.get("url", "")),
             "text": strip_html(j.get("description", "")),
             "ts": j.get("epoch"),
+        })
+    return jobs
+
+
+def fetch_himalayas(query):
+    q = urllib.parse.urlencode({"q": query, "sort": "recent", "page": 1})
+    data = http(f"https://himalayas.app/jobs/api/search?{q}", headers={"User-Agent": USER_AGENT})
+    listing = data.get("jobs") if isinstance(data, dict) else data
+    jobs = []
+    for j in (listing or []):
+        jobs.append({
+            "source": "Himalayas",
+            "title": str(j.get("title", "")),
+            "company": str(j.get("companyName", "")),
+            "location": ", ".join(j.get("locationRestrictions") or []) or "Worldwide",
+            "link": str(j.get("applicationLink", "")),
+            "text": strip_html(j.get("description", "") or ""),
+            "ts": parse_iso(j.get("publishedAt", "")),
+        })
+    return jobs
+
+
+def fetch_arbeitnow():
+    data = http("https://www.arbeitnow.com/api/job-board-api", headers={"User-Agent": USER_AGENT})
+    jobs = []
+    for j in (data or {}).get("data", []):
+        jobs.append({
+            "source": "Arbeitnow",
+            "title": str(j.get("title", "")),
+            "company": str(j.get("company_name", "")),
+            "location": str(j.get("location", "")) or ("Remote" if j.get("remote") else ""),
+            "link": str(j.get("url", "")),
+            "text": strip_html(j.get("description", "") or ""),
+            "ts": j.get("created_at"),
         })
     return jobs
 
@@ -223,6 +260,29 @@ def main():
         except Exception as err:
             print(f"RemoteOK '{tag}': could not fetch ({err})")
         time.sleep(2)
+
+    for query in HIMALAYAS_QUERIES:
+        searches_tried += 1
+        try:
+            found = fetch_himalayas(query)
+            jobs += found
+            searches_worked += 1
+            print(f"Himalayas '{query}': fetched {len(found)} job(s).")
+        except Exception as err:
+            print(f"Himalayas '{query}': could not fetch ({err})")
+        time.sleep(2)
+
+    searches_tried += 1
+    try:
+        found = fetch_arbeitnow()
+        jobs += found
+        searches_worked += 1
+        print(f"Arbeitnow: fetched {len(found)} job(s).")
+    except Exception as err:
+        print(f"Arbeitnow: could not fetch ({err})")
+
+    # Graphic design, logo, flyer, and social media design jobs go first
+    jobs.sort(key=lambda j: 0 if has_any((j["title"] + " " + j["text"]).lower(), PRIORITY_TERMS) else 1)
 
     matched = 0
     seen = set()
